@@ -1,7 +1,7 @@
 import type { Probot, Context } from "probot";
 
-import { openDb } from "./database/db";
-import { loadConfig } from "./config/onramp-config";
+import { openDb, type Db } from "./database/db";
+import { loadConfig, type ConfigClient } from "./config/onramp-config";
 import {
   recordIssueClaimed,
   recordIssueUnclaimed,
@@ -83,41 +83,75 @@ export default (app: Probot) => {
     });
   });
 
-  setInterval(() => {
-    runInstallationSweeps(app, db).catch((error) => app.log.error(error));
-  }, SWEEP_INTERVAL_MS);
+  if (SWEEP_INTERVAL_MS > 0) {
+    setInterval(() => {
+      runInstallationSweeps(app, db).catch((error) => app.log.error(error));
+    }, SWEEP_INTERVAL_MS);
+  }
 };
 
+/** The slice of an installation-scoped Octokit that a sweep needs. */
+export interface SweepOctokit {
+  paginate: <T>(fn: unknown, params?: unknown) => Promise<T[]>;
+  apps: { listReposAccessibleToInstallation: unknown };
+  issues: {
+    createComment(args: {
+      owner: string;
+      repo: string;
+      issue_number: number;
+      body: string;
+    }): Promise<unknown>;
+  };
+  repos: ConfigClient["repos"];
+}
+
+interface AccessibleRepo {
+  full_name: string;
+  name: string;
+  owner: { login: string };
+}
+
 /**
- * Cross-repo cron: iterates every repo onramp is installed on and runs a
- * staleness sweep. Probot has no built-in scheduler, so this is the
- * documented pattern - app.auth() with no id gets the app-level client used
- * to list installations, app.auth(id) gets a client scoped to each one.
+ * Sweeps every repo one installation's Octokit client can see. Kept separate
+ * from `runInstallationSweeps` below so it's unit-testable against a fake
+ * `SweepOctokit` instead of a real, app-authenticated one.
  */
-async function runInstallationSweeps(app: Probot, db: ReturnType<typeof openDb>): Promise<void> {
+export async function sweepRepos(octokit: SweepOctokit, db: Db, now: number): Promise<void> {
+  const repos = await octokit.paginate<AccessibleRepo>(
+    octokit.apps.listReposAccessibleToInstallation,
+  );
+
+  const client: NudgeClient = {
+    async postComment({ owner, repo, issueNumber, body }) {
+      await octokit.issues.createComment({ owner, repo, issue_number: issueNumber, body });
+    },
+  };
+
+  for (const repo of repos) {
+    const config = await loadConfig(octokit, { owner: repo.owner.login, repo: repo.name });
+
+    await runFunnelSweep({
+      db,
+      client,
+      repoFullName: repo.full_name,
+      config,
+      now,
+    });
+  }
+}
+
+/**
+ * Cross-repo cron: iterates every installation onramp is on and sweeps each
+ * one's repos. Probot has no built-in scheduler, so this is the documented
+ * pattern - app.auth() with no id gets the app-level client used to list
+ * installations, app.auth(id) gets a client scoped to each one.
+ */
+async function runInstallationSweeps(app: Probot, db: Db): Promise<void> {
   const appOctokit = await app.auth();
   const installations = await appOctokit.paginate(appOctokit.apps.listInstallations);
 
   for (const installation of installations) {
     const octokit = await app.auth(installation.id);
-    const repos = await octokit.paginate(octokit.apps.listReposAccessibleToInstallation);
-
-    const client: NudgeClient = {
-      async postComment({ owner, repo, issueNumber, body }) {
-        await octokit.issues.createComment({ owner, repo, issue_number: issueNumber, body });
-      },
-    };
-
-    for (const repo of repos) {
-      const config = await loadConfig(octokit, { owner: repo.owner.login, repo: repo.name });
-
-      await runFunnelSweep({
-        db,
-        client,
-        repoFullName: repo.full_name,
-        config,
-        now: Date.now(),
-      });
-    }
+    await sweepRepos(octokit as unknown as SweepOctokit, db, Date.now());
   }
 }

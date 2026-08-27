@@ -1,5 +1,5 @@
 name: onramp
-description: Watches your project's contributor funnel and nudges it back into motion when it stalls.
+description: Watches a project contributor funnel and nudges it back into motion when it stalls.
 url: https://github.com/Bryandero98/onramp
 public: true
 default_events:
