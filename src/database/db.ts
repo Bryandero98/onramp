@@ -15,7 +15,12 @@ export type Db = BetterSQLite3Database<typeof schema> & {
  */
 export function openDb(path: string): Db {
   const sqlite = new BetterSqlite3(path);
-  sqlite.pragma("journal_mode = WAL");
+  // WAL is meaningless for :memory: (there's no file for a shared WAL log to
+  // live in) - setting it anyway has been observed to crash the native
+  // binding on some platforms, so only do it for a real on-disk database.
+  if (path !== ":memory:") {
+    sqlite.pragma("journal_mode = WAL");
+  }
   migrate(sqlite);
   return Object.assign(drizzle(sqlite, { schema }), { $sqlite: sqlite });
 }
