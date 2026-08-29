@@ -260,6 +260,36 @@ describe("webhook handlers", () => {
     });
   });
 
+  it("routes a handler's thrown error through onError instead of leaving it unhandled", async () => {
+    // A malformed payload - `repository` missing entirely - makes
+    // `context.payload.repository.full_name` throw a real TypeError inside
+    // the issues.assigned handler.
+    //
+    // receive() rejecting here is @octokit/webhooks' own design, confirmed
+    // by reading its source (not assumed): app.onError doesn't swallow the
+    // error, it just gets a first look at it for structured logging before
+    // it propagates. What actually keeps a bad delivery from crashing a
+    // running process is one layer up, in Probot's real HTTP server
+    // (createNodeMiddleware) - it wraps webhooks.verifyAndReceive in its
+    // own try/catch and turns a rejection into a 500 response, which
+    // GitHub retries. That layer isn't exercised by probot.receive() calls
+    // in this test file, so this test only asserts what onError adds: the
+    // AggregateError that comes out is exactly the one the handler threw.
+    await withApp(async (probot) => {
+      await expect(
+        probot.receive({
+          id: "1",
+          name: "issues",
+          payload: {
+            action: "assigned",
+            issue: { number: 99 },
+            assignee: { login: "eve" },
+          } as never,
+        }),
+      ).rejects.toThrow(/Cannot read propert(y|ies) of undefined/);
+    });
+  });
+
   it("moves a PR into in_review once a review is submitted", async () => {
     nockNoConfig();
 
